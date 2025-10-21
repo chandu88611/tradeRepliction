@@ -1,0 +1,12 @@
+node_modules/
+dist/
+.env
+temp/
+package-lock.json
+coverage
+/postgres/data
+/appGroupDataService/node_modules
+node_modules
+old.*
+pseudo-*
+.vscode
