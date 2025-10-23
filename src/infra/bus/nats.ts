@@ -62,43 +62,54 @@
 //   };
 // }
 
-
+// src/infra/bus/nats.ts
 import {
   connect,
   StringCodec,
   consumerOpts,
+  RetentionPolicy,
   type NatsConnection,
   type JetStreamClient,
   type JetStreamManager,
-} from 'nats';
-import { cfg } from '../../config/index.js';
+} from "nats";
+import { cfg } from "../../config/index.js";
 
 export type NatsBus = {
   nc: NatsConnection;
   js: JetStreamClient;
   jsm: JetStreamManager;
   publish: (subject: string, data: string | Uint8Array) => Promise<void>;
-  subscribe: (subject: string, onMsg: (data: Uint8Array) => Promise<void>) => Promise<() => Promise<void>>;
+  subscribe: (
+    subject: string,
+    onMsg: (data: Uint8Array) => Promise<void>
+  ) => Promise<() => Promise<void>>;
   ensureStreams: (brokers: string[]) => Promise<void>;
 };
 
 export async function createNatsBus(): Promise<NatsBus> {
   const nc = await connect({
-    servers: cfg.nats?.url || process.env.NATS_URL || 'nats://localhost:4222',
+    servers: cfg.nats?.url || process.env.NATS_URL || "nats://localhost:4222",
     user: cfg.nats?.user || process.env.NATS_USER,
     pass: cfg.nats?.pass || process.env.NATS_PASS,
   });
 
-  const js = nc.jetstream();          
-  const jsm = await nc.jetstreamManager();   
+  const js = nc.jetstream();
+  const jsm = await nc.jetstreamManager();
   const sc = StringCodec();
 
   async function ensureStream(name: string, subjects: string[]) {
     try {
-      await jsm.streams.add({ name, subjects });  
+      await jsm.streams.add({
+        name,
+        subjects,
+        retention: RetentionPolicy.Limits, // ✅ enum, not string
+      });
     } catch (e: any) {
-      const m = String(e?.message || '');
-      if (!m.toLowerCase().includes('already in use') && !m.toLowerCase().includes('exists')) {
+      const m = String(e?.message || "");
+      if (
+        !m.toLowerCase().includes("already in use") &&
+        !m.toLowerCase().includes("exists")
+      ) {
         throw e;
       }
     }
@@ -108,23 +119,33 @@ export async function createNatsBus(): Promise<NatsBus> {
     nc,
     js,
     jsm,
+
     async publish(subject, data) {
-      await js.publish(subject, typeof data === 'string' ? sc.encode(data) : data);
+      await js.publish(
+        subject,
+        typeof data === "string" ? sc.encode(data) : data
+      );
     },
+
     async subscribe(subject, onMsg) {
-      const durable = subject.replace(/\W/g, '_');
+      const durable = subject.replace(/\W/g, "_");
+
+      // ✅ use consumerOpts builder
       const opts = consumerOpts();
       opts.durable(durable);
-      opts.manualAck(); 
-      opts.ackExplicit();   
-      const sub = await js.subscribe(subject, opts);
+      opts.manualAck();
+      opts.ackExplicit();
+
+      const sub = await js.pullSubscribe(subject, opts);
 
       (async () => {
         for await (const m of sub) {
           try {
             await onMsg(m.data);
-            m.ack();        
-          } catch {
+            m.ack();
+          } catch (err) {
+            console.error("❌ Handler failed", err);
+            // no ack → message will be retried
           }
         }
       })();
@@ -133,6 +154,7 @@ export async function createNatsBus(): Promise<NatsBus> {
         await sub.drain();
       };
     },
+
     async ensureStreams(brokers: string[]) {
       for (const b of brokers) {
         await ensureStream(`SIG_${b}`, [`signals.${b}.p.*`]);
